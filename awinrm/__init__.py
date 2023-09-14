@@ -21,15 +21,12 @@ from asysocks.unicomm.protocol.client.http.commons.factory import HTTPConnection
 from awinrm.protocol import Protocol
 
 
-class Response(object):
-	"""Response from a remote command execution"""
-	def __init__(self, args):
-		self.std_out, self.std_err, self.status_code = args
-
-class Session(object):
-	# TODO implement context manager methods
-	def __init__(self, target, ssl_ctx = None, authtype='auto', **kwargs):
-		factory = HTTPConnectionFactory.from_url(target)
+class Session:
+	def __init__(self, url:str, ssl_ctx = None, authtype='auto', factory:HTTPConnectionFactory = None, **kwargs):
+		if factory is None:
+			if url is None:
+				raise Exception('Either url or factory parameter is required')
+			factory = HTTPConnectionFactory.from_url(url)
 		cred = factory.get_credential()
 		target = factory.get_target().get_url()
 		self.url = self._build_url(target, kwargs.get('transport', 'plaintext'))
@@ -54,16 +51,16 @@ class Session(object):
 	async def run_cmd(self, command, args=()):
 		shell_id = await self.protocol.open_shell()
 		command_id = await self.protocol.run_command(shell_id, command, args)
-		stdout = b''
-		stderr = b''
+		stdout_buff = b''
+		stderr_buff = b''
 		return_code = -1
 		async for stdout, stderr, return_code in self.protocol.get_command_output(shell_id, command_id):
-			stdout += stdout
-			stderr += stderr
+			stdout_buff += stdout
+			stderr_buff += stderr
 			return_code = return_code
 		await self.protocol.cleanup_command(shell_id, command_id)
 		await self.protocol.close_shell(shell_id)
-		return stdout, stderr, return_code
+		return stdout_buff, stderr_buff, return_code
 
 	async def run_ps(self, script):
 		"""base64 encodes a Powershell script and executes the powershell
