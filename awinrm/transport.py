@@ -49,7 +49,7 @@ class Transport(object):
         }
 
         self.session = None
-        self.encryption = None  # The Pywinrm Encryption class used to encrypt/decrypt messages
+        self.encryption = None
 
     async def build_session(self):
         async with ClientSession() as session:

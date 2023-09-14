@@ -55,7 +55,7 @@ class Encryption(object):
             self._decrypt_message = self._decrypt_credssp_message
             
         else:
-            raise WinRMError("Encryption for protocol '%s' not supported in pywinrm" % protocol)
+            raise WinRMError("Encryption for protocol '%s' not supported in awinrm" % protocol)
 
     async def prepare_encrypted_request(self, endpoint, message):
         """
