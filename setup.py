@@ -47,6 +47,8 @@ setup(
 		'unicrypto==0.0.10',
 		'asysocks>=0.2.8',
         'asyauth>=0.0.14',
+		'six',
+        'xmltodict',
 	],
 
     entry_points={
