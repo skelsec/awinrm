@@ -31,7 +31,7 @@ class Protocol(object):
     DEFAULT_LOCALE = 'en-US'
 
     def __init__(
-            self, endpoint, credential, ssl_ctx=None, service="HTTP",
+            self, endpoint, credential, proxies, ssl_ctx=None, service="HTTP",
             read_timeout_sec=DEFAULT_READ_TIMEOUT_SEC,
             operation_timeout_sec=DEFAULT_OPERATION_TIMEOUT_SEC,
             message_encryption='auto', authtype='auto'
@@ -83,6 +83,7 @@ class Protocol(object):
             ssl_ctx=ssl_ctx,
             read_timeout_sec=self.read_timeout_sec,
             authtype = authtype,
+            proxies = proxies,
         )
 
         self.service = service

@@ -45,7 +45,7 @@ setup(
 	],
 	install_requires=[
 		'unicrypto==0.0.10',
-		'asysocks>=0.2.8',
+		'asysocks>=0.2.10',
         'asyauth>=0.0.14',
 		'six',
         'xmltodict',

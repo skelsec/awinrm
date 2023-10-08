@@ -36,7 +36,8 @@ class Transport(object):
             credential,
             authtype='auto',
             ssl_ctx=None,
-            read_timeout_sec=None):
+            read_timeout_sec=None,
+            proxies=None):
         self.credential = credential
         self.ssl_ctx = ssl_ctx
         self.endpoint = endpoint
@@ -47,12 +48,13 @@ class Transport(object):
             'Content-Type': 'application/soap+xml;charset=UTF-8',
             'User-Agent': 'Python WinRM client',
         }
+        self.proxies = proxies
 
         self.session = None
         self.encryption = None
 
     async def build_session(self):
-        async with ClientSession() as session:
+        async with ClientSession(proxies = self.proxies) as session:
             session.static_headers.update(self.default_headers)
             async with session.post(self.endpoint, data=None) as response:
                 respdata = await response.read()
@@ -71,7 +73,7 @@ class Transport(object):
                 elif response.status == 200:
                     raise WinRMTransportError('http', response.status, 'Server doesn\'t require authentication. This is unexpected!')
                 
-        session = ClientSession(credential=self.credential, ssl_ctx=self.ssl_ctx, force_sinle_connection=True, auth_type=self.authtype)
+        session = ClientSession(credential=self.credential, ssl_ctx=self.ssl_ctx, force_sinle_connection=True, auth_type=self.authtype,proxies = self.proxies)
         session.static_headers.update(self.default_headers)
         self.session = session
         await self.setup_encryption()

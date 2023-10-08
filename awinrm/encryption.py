@@ -14,7 +14,7 @@ class Encryption(object):
     SIXTEN_KB = 16384
     MIME_BOUNDARY = b'--Encrypted Boundary'
 
-    def __init__(self, session, protocol):
+    def __init__(self, session, protocol:str):
         """
         [MS-WSMV] v30.0 2016-07-14
 
@@ -35,12 +35,12 @@ class Encryption(object):
         :param protocol: The auth protocol used, will determine the wrapping and unwrapping method plus
                          the protocol string to use. Currently only NTLM and CredSSP is supported
         """
-        self.protocol = protocol
+        self.protocol = protocol.lower()
         self.session = session
         self.sequence_number = 0
-        logger.debug('Using encryption protocol: %s' % protocol)
+        logger.debug('Using encryption protocol: %s' % self.protocol)
         cred = self.session.authmanager.authobj.get_active_credential()
-        if protocol == 'spnego':  # Details under Negotiate [2.2.9.1.1] in MS-WSMV
+        if self.protocol == 'spnego':  # Details under Negotiate [2.2.9.1.1] in MS-WSMV
             self.protocol_string = b"application/HTTP-SPNEGO-session-encrypted"
             if isinstance(cred, NTLMCredential):
                 self._build_message = self._build_ntlm_message
@@ -49,13 +49,13 @@ class Encryption(object):
                 self._build_message = self._build_kerberos_message
                 self._decrypt_message = self._decrypt_kerberos_message
 
-        elif protocol == 'credssp':  # Details under CredSSP [2.2.9.1.3] in MS-WSMV
+        elif self.protocol == 'credssp':  # Details under CredSSP [2.2.9.1.3] in MS-WSMV
             self.protocol_string = b"application/HTTP-CredSSP-session-encrypted"
             self._build_message = self._build_credssp_message
             self._decrypt_message = self._decrypt_credssp_message
             
         else:
-            raise WinRMError("Encryption for protocol '%s' not supported in awinrm" % protocol)
+            raise WinRMError("Encryption for protocol '%s' not supported in awinrm" % self.protocol)
 
     async def prepare_encrypted_request(self, endpoint, message):
         """

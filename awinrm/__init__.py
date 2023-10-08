@@ -28,9 +28,9 @@ class Session:
 				raise Exception('Either url or factory parameter is required')
 			factory = HTTPConnectionFactory.from_url(url)
 		cred = factory.get_credential()
-		target = factory.get_target().get_url()
-		self.url = self._build_url(target, kwargs.get('transport', 'plaintext'))
-		self.protocol = Protocol(self.url, cred, ssl_ctx = ssl_ctx, authtype=authtype, **kwargs)
+		target = factory.get_target()
+		self.url = self._build_url(target.get_url(), kwargs.get('transport', 'plaintext'))
+		self.protocol = Protocol(self.url, cred, ssl_ctx = ssl_ctx, authtype=authtype, proxies=target.proxies, **kwargs)
 		self.__shells = []
 
 	async def __aenter__(self):
