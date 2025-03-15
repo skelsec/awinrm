@@ -31,8 +31,7 @@ setup(
 	url="https://github.com/skelsec/awinrm",
 
 	zip_safe = False,
-	#
-	license='MIT license',
+	#license='MIT license',
 	description='Asynchronous Python library for Windows Remote Management',
 	long_description='Asynchronous Python library for Windows Remote Management',
 
