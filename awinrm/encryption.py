@@ -9,12 +9,6 @@ from asyauth.common.credentials.kerberos import KerberosCredential
 from asyauth.common.credentials.spnego import SPNEGOCredential
 from asyauth.common.credentials.credssp import CREDSSPCredential
 
-# Import IOV patch for Kerberos AES support
-try:
-    from awinrm.asyauth_iov_patch import patch_gssapi_aes
-    patch_gssapi_aes()
-except ImportError:
-    pass  # Patch not available, will use fallback
 
 class Encryption(object):
 
@@ -166,34 +160,41 @@ class Encryption(object):
         return message
 
     async def _decrypt_kerberos_message(self, encrypted_data, host):
-        signature_length = struct.unpack("<i", encrypted_data[:4])[0]
-        raw_header = encrypted_data[4:signature_length + 4]
-        encrypted_rest = encrypted_data[signature_length + 4:]
+        """Decrypt Kerberos-encrypted WinRM message.
+        
+        WinRM format: sig_len(4) + header(sig_len) + encrypted_data
+        For AES (CFX tokens): header + data is passed directly to GSS_Unwrap
+        For RC4 (legacy tokens): requires special handling
+        """
+        sig_len = struct.unpack("<i", encrypted_data[:4])[0]
+        header = encrypted_data[4:4 + sig_len]
+        data = encrypted_data[4 + sig_len:]
         
         # Check for CFX token ID (0x0504) which indicates AES encryption
-        is_cfx = len(raw_header) >= 2 and raw_header[0:2] == b'\x05\x04'
+        is_cfx = len(header) >= 2 and header[0:2] == b'\x05\x04'
         
         if is_cfx:
-            # For AES/CFX tokens, combine header + data for GSS_Unwrap_Combined
-            # This handles the format returned by WinRM servers
+            # AES/CFX: combine header + data and pass to GSS_Unwrap
             auth_ctx = self.session.authmanager.authobj.selected_authentication_context
             gssapi = getattr(auth_ctx, 'gssapi', None)
             
-            if gssapi is not None and hasattr(gssapi, 'GSS_Unwrap_Combined'):
-                combined = raw_header + encrypted_rest
-                message, _ = gssapi.GSS_Unwrap_Combined(combined, 0, direction='accept')
+            if gssapi is not None:
+                combined = header + data
+                message, err = gssapi.GSS_Unwrap(combined, 0, direction='accept')
+                if err:
+                    raise WinRMError(f'Kerberos decryption failed: {err}')
                 return message
         
-        # Fallback to standard decryption (for RC4)
+        # RC4/Legacy token handling
         # For Kerberos RC4, header is 24 bytes, confounder is first 8 bytes of encrypted data
-        if signature_length == 24 and len(encrypted_rest) >= 8:
-            encrypted_confounder = encrypted_rest[:8]
-            encrypted_message = encrypted_rest[8:]
+        if sig_len == 24 and len(data) >= 8:
+            encrypted_confounder = data[:8]
+            encrypted_message = data[8:]
             # Reconstruct 32-byte token (header + confounder) for asyauth
-            raw_signature = raw_header + encrypted_confounder
+            raw_signature = header + encrypted_confounder
         else:
-            raw_signature = raw_header
-            encrypted_message = encrypted_rest
+            raw_signature = header
+            encrypted_message = data
 
         # Re-wrap the raw token with GSSAPI OID for the decrypt function
         # GSSAPI OID: 1.2.840.113554.1.2.2 (Kerberos 5)
@@ -222,18 +223,41 @@ class Encryption(object):
         return struct.pack("<i", trailer_length) + sealed_message
 
     async def _build_kerberos_message(self, message, host):
-        # Get the GSSAPI context to check if IOV is available
+        """Build Kerberos-encrypted WinRM message.
+        
+        Uses the GSSAPI context from asyauth to encrypt the message.
+        WinRM expects: sig_len(4) + header(60) + encrypted_data
+        
+        For AES (non-DCE GSSAPI):
+            GSS_Wrap returns (cipher, token) where:
+            - token: 16-byte CFX header
+            - cipher: rotated encrypted data
+            Combined format: token(16) + cipher
+            WinRM format: first 60 bytes as header, rest as data
+        
+        For RC4 (legacy tokens):
+            Falls back to standard asyauth encrypt method
+        """
         auth_ctx = self.session.authmanager.authobj.selected_authentication_context
         gssapi = getattr(auth_ctx, 'gssapi', None)
         
-        # Use IOV encryption if available (for AES encryption types)
-        if gssapi is not None and hasattr(gssapi, 'GSS_Wrap_IOV'):
-            enc_data, header, _ = gssapi.GSS_Wrap_IOV(message, self.sequence_number)
+        # Check if this is AES (has GSSAPI_AES class from gssapi.py module)
+        if gssapi is not None and type(gssapi).__name__ == 'GSSAPI_AES':
+            # Non-DCE GSSAPI: GSS_Wrap returns (cipher, token)
+            cipher, token = gssapi.GSS_Wrap(message, self.sequence_number)
             self.sequence_number += 1
-            signature_length = struct.pack("<i", len(header))
-            return signature_length + header + enc_data
+            
+            # Combine: token(16) + cipher
+            combined = token + cipher
+            
+            # WinRM format: header(60) + data(rest)
+            header = combined[:60]
+            data = combined[60:]
+            
+            sig_len = struct.pack("<i", len(header))
+            return sig_len + header + data
         
-        # Fallback to standard encryption (for RC4)
+        # Fallback: use standard asyauth encrypt (for RC4 or unknown types)
         sealed_message, signature = await self.session.authmanager.authobj.encrypt(message, self.sequence_number)
         self.sequence_number += 1
         
