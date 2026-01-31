@@ -9,6 +9,7 @@ from asyauth.common.credentials.kerberos import KerberosCredential
 from asyauth.common.credentials.spnego import SPNEGOCredential
 from asyauth.common.credentials.credssp import CREDSSPCredential
 
+
 class Encryption(object):
 
     SIXTEN_KB = 16384
@@ -41,11 +42,13 @@ class Encryption(object):
         logger.debug('Using encryption protocol: %s' % self.protocol)
         cred = self.session.authmanager.authobj.get_active_credential()
         if self.protocol == 'spnego':  # Details under Negotiate [2.2.9.1.1] in MS-WSMV
-            self.protocol_string = b"application/HTTP-SPNEGO-session-encrypted"
             if isinstance(cred, NTLMCredential):
+                self.protocol_string = b"application/HTTP-SPNEGO-session-encrypted"
                 self._build_message = self._build_ntlm_message
                 self._decrypt_message = self._decrypt_ntlm_message
             elif isinstance(cred, KerberosCredential):
+                # For Kerberos over SPNEGO, still use SPNEGO protocol string
+                self.protocol_string = b"application/HTTP-SPNEGO-session-encrypted"
                 self._build_message = self._build_kerberos_message
                 self._decrypt_message = self._decrypt_kerberos_message
 
@@ -157,11 +160,54 @@ class Encryption(object):
         return message
 
     async def _decrypt_kerberos_message(self, encrypted_data, host):
-        signature_length = struct.unpack("<i", encrypted_data[:4])[0]
-        signature = b'\x00'*8 + encrypted_data[4:signature_length + 4]
-        encrypted_message = encrypted_data[signature_length + 4:]
+        """Decrypt Kerberos-encrypted WinRM message.
+        
+        WinRM format: sig_len(4) + header(sig_len) + encrypted_data
+        For AES (CFX tokens): header + data is passed directly to GSS_Unwrap
+        For RC4 (legacy tokens): requires special handling
+        """
+        sig_len = struct.unpack("<i", encrypted_data[:4])[0]
+        header = encrypted_data[4:4 + sig_len]
+        data = encrypted_data[4 + sig_len:]
+        
+        # Check for CFX token ID (0x0504) which indicates AES encryption
+        is_cfx = len(header) >= 2 and header[0:2] == b'\x05\x04'
+        
+        if is_cfx:
+            # AES/CFX: combine header + data and pass to GSS_Unwrap
+            auth_ctx = self.session.authmanager.authobj.selected_authentication_context
+            gssapi = getattr(auth_ctx, 'gssapi', None)
+            
+            if gssapi is not None:
+                combined = header + data
+                message, err = gssapi.GSS_Unwrap(combined, 0, direction='accept')
+                if err:
+                    raise WinRMError(f'Kerberos decryption failed: {err}')
+                return message
+        
+        # RC4/Legacy token handling
+        # For Kerberos RC4, header is 24 bytes, confounder is first 8 bytes of encrypted data
+        if sig_len == 24 and len(data) >= 8:
+            encrypted_confounder = data[:8]
+            encrypted_message = data[8:]
+            # Reconstruct 32-byte token (header + confounder) for asyauth
+            raw_signature = header + encrypted_confounder
+        else:
+            raw_signature = header
+            encrypted_message = data
 
-        message, _ = await self.session.authmanager.authobj.decrypt(encrypted_message, None, auth_data=signature)
+        # Re-wrap the raw token with GSSAPI OID for the decrypt function
+        # GSSAPI OID: 1.2.840.113554.1.2.2 (Kerberos 5)
+        gssapi_oid = b'\x06\x09\x2a\x86\x48\x86\xf7\x12\x01\x02\x02'
+        inner_len = len(gssapi_oid) + len(raw_signature)
+        if inner_len < 0x80:
+            gssapi_header = b'\x60' + bytes([inner_len]) + gssapi_oid
+        else:
+            gssapi_header = b'\x60\x81' + bytes([inner_len]) + gssapi_oid
+        signature = b'\x00'*8 + gssapi_header + raw_signature
+
+        # Pass 0 as dummy sequence number - actual seq is derived from signature's SND_SEQ
+        message, _ = await self.session.authmanager.authobj.decrypt(encrypted_message, 0, auth_data=signature)
         return message
 
     async def _build_ntlm_message(self, message, host):
@@ -177,9 +223,70 @@ class Encryption(object):
         return struct.pack("<i", trailer_length) + sealed_message
 
     async def _build_kerberos_message(self, message, host):
-        self.sequence_number = 0
-        sealed_message, signature = await self.session.authmanager.authobj.encrypt(message, self.sequence_number) ##TODO: Check if this is correct
+        """Build Kerberos-encrypted WinRM message.
+        
+        Uses the GSSAPI context from asyauth to encrypt the message.
+        WinRM expects: sig_len(4) + header(60) + encrypted_data
+        
+        For AES (non-DCE GSSAPI):
+            GSS_Wrap returns (cipher, token) where:
+            - token: 16-byte CFX header
+            - cipher: rotated encrypted data
+            Combined format: token(16) + cipher
+            WinRM format: first 60 bytes as header, rest as data
+        
+        For RC4 (legacy tokens):
+            Falls back to standard asyauth encrypt method
+        """
+        auth_ctx = self.session.authmanager.authobj.selected_authentication_context
+        gssapi = getattr(auth_ctx, 'gssapi', None)
+        
+        # Check if this is AES (has GSSAPI_AES class from gssapi.py module)
+        if gssapi is not None and type(gssapi).__name__ == 'GSSAPI_AES':
+            # Non-DCE GSSAPI: GSS_Wrap returns (cipher, token)
+            cipher, token = gssapi.GSS_Wrap(message, self.sequence_number)
+            self.sequence_number += 1
+            
+            # Combine: token(16) + cipher
+            combined = token + cipher
+            
+            # WinRM format: header(60) + data(rest)
+            header = combined[:60]
+            data = combined[60:]
+            
+            sig_len = struct.pack("<i", len(header))
+            return sig_len + header + data
+        
+        # Fallback: use standard asyauth encrypt (for RC4 or unknown types)
+        sealed_message, signature = await self.session.authmanager.authobj.encrypt(message, self.sequence_number)
         self.sequence_number += 1
+        
+        # Strip GSSAPI OID wrapper - WinRM expects raw header
+        # GSSAPI token format: 0x60 <length> <OID> <inner content>
+        if signature[0] == 0x60:
+            # Parse ASN.1 length to find OID
+            if signature[1] < 0x80:
+                offset = 2
+            elif signature[1] == 0x81:
+                offset = 3
+            else:
+                offset = 4
+            # Skip OID tag (0x06) and length
+            if signature[offset] == 0x06:
+                oid_len = signature[offset + 1]
+                inner_offset = offset + 2 + oid_len
+                signature = signature[inner_offset:]
+        
+        # For Kerberos RC4, the token from asyauth is 32 bytes:
+        # - 24 bytes: header (TOK_ID, SGN_ALG, SEAL_ALG, Filler, SND_SEQ, SGN_CKSUM)
+        # - 8 bytes: encrypted confounder
+        # WinRM expects: 24-byte signature, then confounder+encrypted_message
+        if len(signature) == 32:
+            header = signature[:24]
+            encrypted_confounder = signature[24:32]
+            signature_length = struct.pack("<i", len(header))
+            return signature_length + header + encrypted_confounder + sealed_message
+        
         signature_length = struct.pack("<i", len(signature))
         return signature_length + signature + sealed_message
 
