@@ -44,11 +44,11 @@ setup(
 	],
 	install_requires=[
 		'unicrypto>=0.0.11',
-		'asysocks>=0.2.10',
-        'asyauth>=0.0.14',
+		'httpx>=0.25.0',
+		'asyauth>=0.0.14',
 		'aioconsole>=0.8.1',
 		'six',
-        'xmltodict',
+		'xmltodict',
 	],
 
     entry_points={

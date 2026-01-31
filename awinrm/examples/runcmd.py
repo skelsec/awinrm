@@ -22,7 +22,6 @@ def main():
 	import argparse
 	import logging
 	from asyauth import logger as authlogger
-	from asysocks import logger as sockslogger
 
 	parser = argparse.ArgumentParser(description='WinRM - Execute a single shell command remotely')
 	parser.add_argument('-v', '--verbose', action='count', default=0, help='Verbosity')
@@ -35,12 +34,10 @@ def main():
 		logging.basicConfig(level=logging.INFO)
 		logger.setLevel(logging.ERROR)
 		authlogger.setLevel(logging.ERROR)
-		sockslogger.setLevel(logging.ERROR)
 	else:
 		logging.basicConfig(level=logging.DEBUG)
 		logger.setLevel(logging.DEBUG)
 		authlogger.setLevel(logging.DEBUG)
-		sockslogger.setLevel(logging.DEBUG)
 	
 	asyncio.run(amain(args.url, args.command, args.authproto))
 
