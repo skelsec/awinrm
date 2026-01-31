@@ -412,7 +412,6 @@ class Protocol(object):
             stdin_envelope['@xmlns:rsp'] = 'http://schemas.microsoft.com/wbem/wsman/1/windows/shell'
             stdin_envelope['#text'] = base64.b64encode(stdin_input)
             res = await self.send_message(xmltodict.unparse(req))
-            print('Res: %s' % repr(res))
         except Exception as e:
             traceback.print_exc()
 
