@@ -92,6 +92,10 @@ class Session:
         
         if credential is None:
             credential = UniCredential.from_url(url)
+            if hasattr(credential, 'etypes') is True:
+                # removing rc4 etypes
+				# a bit of cheating here because we don't support fallback
+                credential.etypes = [18]
         
         # Build endpoint URL
         self.url = self._build_url(url, kwargs.get('transport_type', 'plaintext'))
