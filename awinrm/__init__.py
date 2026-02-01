@@ -4,7 +4,6 @@ awinrm - Asynchronous Python library for Windows Remote Management
 Provides async WinRM client functionality using httpx for HTTP transport
 and asyauth for authentication (SPNEGO/NTLM/Kerberos/CredSSP).
 """
-from __future__ import unicode_literals
 import logging
 
 # Setup logger first to avoid circular import issues
@@ -28,6 +27,28 @@ import httpx
 
 from asyauth.common.credentials import UniCredential
 from awinrm.protocol import Protocol
+from awinrm.exceptions import (
+    ShellTerminatedError, 
+    ShellNotFoundError, 
+    WinRMError,
+    WinRMTransportError,
+    WinRMOperationTimeoutError,
+    AuthenticationError,
+)
+
+# Re-export exceptions for easy import
+__all__ = [
+    'Session',
+    'WinRMShell', 
+    'decode_bytes',
+    'ShellTerminatedError',
+    'ShellNotFoundError',
+    'WinRMError',
+    'WinRMTransportError',
+    'WinRMOperationTimeoutError',
+    'AuthenticationError',
+    'logger',
+]
 
 
 class Session:
@@ -524,6 +545,22 @@ class WinRMShell:
         self.stdout = asyncio.Queue()
         self.stderr = asyncio.Queue()
         self.return_code = None
+        
+        # Track if the shell/command has terminated
+        self._command_done = False
+        self._terminated_evt = asyncio.Event()
+
+    @property
+    def is_terminated(self) -> bool:
+        """Check if the shell has terminated."""
+        return self._terminated_evt.is_set()
+    
+    def _set_terminated(self, exit_code: int = 0):
+        """Mark the shell as terminated."""
+        self._command_done = True
+        self.return_code = exit_code
+        self._terminated_evt.set()
+        self.closed_evt.set()  # Also stop keepalive
 
     async def __aenter__(self):
         try:
@@ -536,21 +573,35 @@ class WinRMShell:
                 idle_timeout=self.idle_timeout
             )
             self.command_id = await self.session.protocol.run_command(self.shell_id, self.shell_cmd)
-            stdout, stderr, return_code, _ = await self.session.protocol._raw_get_command_output(
+            stdout, stderr, return_code, command_done = await self.session.protocol._raw_get_command_output(
                 self.shell_id, self.command_id
             )
             await self.stdout.put(stdout)
             await self.stderr.put(stderr)
             self.return_code = return_code
             
-            # Start keepalive if enabled
-            if self.keepalive_interval > 0:
+            # Check if command completed immediately (unlikely for shells, but possible)
+            if command_done:
+                self._set_terminated(return_code)
+            
+            # Start keepalive if enabled and shell is still running
+            if self.keepalive_interval > 0 and not self.is_terminated:
                 self._start_keepalive()
             
             return self
         except Exception as e:
             await self.__aexit__(None, None, None)
             raise e
+    
+    async def wait_for_termination(self) -> int:
+        """
+        Wait for the shell to terminate.
+        
+        Returns:
+            The exit code of the shell
+        """
+        await self._terminated_evt.wait()
+        return self.return_code or 0
     
     async def __aexit__(self, exc_type, exc, tb):
         await self.close()
@@ -625,7 +676,7 @@ class WinRMShell:
             logger.debug(f'Keepalive ping error: {e}')
 
     async def close(self):
-        """Close the shell."""
+        """Close the shell gracefully."""
         if self.closed_evt.is_set():
             return
         
@@ -633,27 +684,64 @@ class WinRMShell:
         self._stop_keepalive()
         self.closed_evt.set()
         
-        try:
-            await self.session.protocol.cleanup_command(self.shell_id, self.command_id)
-            await self.session.protocol.close_shell(self.shell_id)
-        except Exception as e:
-            logger.warning(f'Error closing shell: {e}')
+        # Only try to clean up if we have valid shell/command IDs
+        if self.shell_id and self.command_id:
+            try:
+                await self.session.protocol.cleanup_command(self.shell_id, self.command_id)
+                await self.session.protocol.close_shell(self.shell_id)
+            except (ShellNotFoundError, ShellTerminatedError):
+                # Shell already gone - this is fine
+                logger.debug('Shell was already closed on server')
+            except Exception as e:
+                logger.debug(f'Error closing shell: {e}')
 
     async def send_input(self, data: bytes):
-        """Send input to the shell."""
+        """
+        Send input to the shell.
+        
+        Raises:
+            ShellTerminatedError: If the shell has already terminated
+            ShellNotFoundError: If the shell no longer exists on the server
+        """
+        if self.is_terminated:
+            raise ShellTerminatedError("Shell has already terminated", self.return_code or 0)
+        
         self._update_activity()
-        await self.session.protocol.send_command_input(self.shell_id, self.command_id, data)
-        await self.read_output()
+        try:
+            await self.session.protocol.send_command_input(self.shell_id, self.command_id, data)
+            await self.read_output()
+        except ShellNotFoundError:
+            self._set_terminated(-1)
+            raise ShellTerminatedError("Shell session was closed by the server", -1)
 
     async def read_output(self):
-        """Read output from the shell."""
+        """
+        Read output from the shell.
+        
+        Raises:
+            ShellTerminatedError: If the shell has terminated
+            ShellNotFoundError: If the shell no longer exists on the server
+        """
+        if self.is_terminated:
+            raise ShellTerminatedError("Shell has already terminated", self.return_code or 0)
+        
         self._update_activity()
-        stdout, stderr, return_code, _ = await self.session.protocol._raw_get_command_output(
-            self.shell_id, self.command_id
-        )
-        await self.stdout.put(stdout)
-        await self.stderr.put(stderr)
-        self.return_code = return_code
+        try:
+            stdout, stderr, return_code, command_done = await self.session.protocol._raw_get_command_output(
+                self.shell_id, self.command_id
+            )
+            await self.stdout.put(stdout)
+            await self.stderr.put(stderr)
+            self.return_code = return_code
+            
+            # Check if the command has completed (shell exited)
+            if command_done:
+                self._set_terminated(return_code)
+                raise ShellTerminatedError("Shell session ended", return_code)
+                
+        except ShellNotFoundError:
+            self._set_terminated(-1)
+            raise ShellTerminatedError("Shell session was closed by the server", -1)
 
 
 def decode_bytes(data: bytes, hint: str = 'cp437') -> str:

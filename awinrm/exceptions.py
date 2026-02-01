@@ -1,5 +1,3 @@
-from __future__ import unicode_literals
-
 
 class WinRMError(Exception):
     """"Generic WinRM error"""
@@ -36,6 +34,35 @@ class WinRMOperationTimeoutError(Exception):
     a long-running process.
     """
     code = 500
+
+
+class ShellTerminatedError(WinRMError):
+    """
+    Raised when the remote shell has terminated (user typed 'exit', process ended, or server closed session).
+    This is a clean exit condition, not an error in the traditional sense.
+    """
+    code = 0
+    
+    def __init__(self, message: str = "Shell session has terminated", exit_code: int = 0):
+        self.exit_code = exit_code
+        super().__init__(message)
+    
+    def __str__(self):
+        return f"Shell terminated (exit code: {self.exit_code})"
+
+
+class ShellNotFoundError(WinRMError):
+    """
+    Raised when trying to interact with a shell that no longer exists on the server.
+    Common WSMan fault codes: 2150858843 (shell not found), 2150858880 (invalid shell id)
+    """
+    code = 404
+    
+    def __init__(self, shell_id: str = None, message: str = None):
+        self.shell_id = shell_id
+        if message is None:
+            message = f"Shell '{shell_id}' not found or has been closed" if shell_id else "Shell not found or has been closed"
+        super().__init__(message)
 
 
 class AuthenticationError(WinRMError):

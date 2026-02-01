@@ -3,8 +3,9 @@ HTTP Transport layer using httpx with asyauth integration.
 
 Supports custom transport for advanced use cases (proxies, custom SSL, etc.)
 """
-from __future__ import unicode_literals
 import ssl
+import copy
+import base64
 from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlsplit
 
@@ -20,11 +21,6 @@ from asyauth.common.credentials.kerberos import KerberosCredential
 from asyauth.common.credentials.spnego import SPNEGOCredential
 from asyauth.common.credentials.credssp import CREDSSPCredential
 from asyauth.common.winapi.constants import ISC_REQ
-
-import copy
-import base64
-
-unicode_type = type(u'')
 
 __all__ = ['Transport']
 
