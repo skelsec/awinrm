@@ -15,6 +15,10 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 logger.propagate = False
 
+# Silence httpx and httpcore loggers - they're too chatty
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+
 import re
 import ssl
 import asyncio
