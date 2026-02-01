@@ -1,17 +1,13 @@
 """Contains client side logic of WinRM SOAP protocol implementation"""
-from __future__ import unicode_literals
 import base64
 import uuid
-import asyncio
-
 import xml.etree.ElementTree as ET
-import xmltodict
 import traceback
 
-from six import text_type
+import xmltodict
 
 from awinrm.transport import Transport
-from awinrm.exceptions import WinRMError, WinRMTransportError, WinRMOperationTimeoutError
+from awinrm.exceptions import WinRMError, WinRMTransportError, WinRMOperationTimeoutError, ShellNotFoundError
 
 xmlns = {
     'soapenv': 'http://www.w3.org/2003/05/soap-envelope',
@@ -31,39 +27,34 @@ class Protocol(object):
     DEFAULT_LOCALE = 'en-US'
 
     def __init__(
-            self, endpoint, credential, proxies, ssl_ctx=None, service="HTTP",
+            self, endpoint, credential, proxies=None, ssl_ctx=None, service="HTTP",
             read_timeout_sec=DEFAULT_READ_TIMEOUT_SEC,
             operation_timeout_sec=DEFAULT_OPERATION_TIMEOUT_SEC,
-            message_encryption='auto', authtype='auto'
+            message_encryption='auto', authtype='auto',
+            http_transport=None, verify=True, **kwargs
         ):
         """
         @param string endpoint: the WinRM webservice endpoint
-        @param string transport: transport type, one of 'plaintext' (default), 'kerberos', 'ssl', 'ntlm', 'credssp'  # NOQA
-        @param string username: username
-        @param string password: password
-        @param string realm: unused
+        @param credential: asyauth credential object
+        @param dict proxies: Proxy configuration
+        @param ssl_ctx: Optional SSL context for HTTPS
         @param string service: the service name, default is HTTP
-        @param string keytab: the path to a keytab file if you are using one
-        @param string ca_trust_path: Certification Authority trust path. If server_cert_validation is set to 'validate':
-                                        'legacy_requests'(default) to use environment variables,
-                                        None to explicitly disallow any additional CA trust path
-                                        Any other value will be considered the CA trust path to use.
-        @param string cert_pem: client authentication certificate file path in PEM format  # NOQA
-        @param string cert_key_pem: client authentication certificate key file path in PEM format  # NOQA
-        @param string server_cert_validation: whether server certificate should be validated on Python versions that support it; one of 'validate' (default), 'ignore' #NOQA
-        @param bool kerberos_delegation: if True, TGT is sent to target server to allow multiple hops  # NOQA
-        @param int read_timeout_sec: maximum seconds to wait before an HTTP connect/read times out (default 30). This value should be slightly higher than operation_timeout_sec, as the server can block *at least* that long. # NOQA
-        @param int operation_timeout_sec: maximum allowed time in seconds for any single wsman HTTP operation (default 20). Note that operation timeouts while receiving output (the only wsman operation that should take any significant time, and where these timeouts are expected) will be silently retried indefinitely. # NOQA
-        @param string kerberos_hostname_override: the hostname to use for the kerberos exchange (defaults to the hostname in the endpoint URL)
-        @param bool message_encryption_enabled: Will encrypt the WinRM messages if set to True and the transport auth supports message encryption (Default True).
-        @param string proxy: Specify a proxy for the WinRM connection to use. 'legacy_requests'(default) to use environment variables, None to disable proxies completely or the proxy URL itself.
+        @param int read_timeout_sec: maximum seconds to wait before an HTTP connect/read times out (default 30)
+        @param int operation_timeout_sec: maximum allowed time in seconds for any single wsman HTTP operation (default 20)
+        @param string authtype: authentication type ('auto', 'spnego', 'credssp')
+        @param http_transport: Optional custom httpx transport for advanced use cases
+        @param bool verify: Whether to verify SSL certificates (default: True)
         """
 
+        if read_timeout_sec is None:
+            read_timeout_sec = self.DEFAULT_READ_TIMEOUT_SEC
         try:
             read_timeout_sec = int(read_timeout_sec)
         except ValueError as ve:
             raise ValueError("failed to parse read_timeout_sec as int: %s" % str(ve))
 
+        if operation_timeout_sec is None:
+            operation_timeout_sec = self.DEFAULT_OPERATION_TIMEOUT_SEC
         try:
             operation_timeout_sec = int(operation_timeout_sec)
         except ValueError as ve:
@@ -82,8 +73,10 @@ class Protocol(object):
             credential=credential,
             ssl_ctx=ssl_ctx,
             read_timeout_sec=self.read_timeout_sec,
-            authtype = authtype,
-            proxies = proxies,
+            authtype=authtype,
+            proxies=proxies,
+            transport=http_transport,
+            verify=verify,
         )
 
         self.service = service
@@ -226,7 +219,6 @@ class Protocol(object):
             resp = await self.transport.send_message(message)
             return resp
         except WinRMTransportError as ex:
-            traceback.print_exc()
             try:
                 # if response is XML-parseable, it's probably a SOAP fault; extract the details
                 root = ET.fromstring(ex.response_text)
@@ -243,10 +235,18 @@ class Protocol(object):
                 wsmanfault_code = fault.find('soapenv:Detail/wsmanfault:WSManFault[@Code]', xmlns)
                 if wsmanfault_code is not None:
                     fault_data['wsmanfault_code'] = wsmanfault_code.get('Code')
+                    
                     # convert receive timeout code to WinRMOperationTimeoutError
                     if fault_data['wsmanfault_code'] == '2150858793':
                         # TODO: this fault code is specific to the Receive operation; convert all op timeouts?
                         raise WinRMOperationTimeoutError()
+                    
+                    # Shell not found errors - session has been terminated on the server
+                    # 2150858843 = The WS-Management service cannot find the resource identified
+                    # 2150858880 = The shell associated with the specified ShellId is not valid
+                    # 2150859046 = The WS-Management service cannot complete the operation
+                    if fault_data['wsmanfault_code'] in ('2150858843', '2150858880', '2150859046'):
+                        raise ShellNotFoundError()
 
                 fault_code = fault.find('soapenv:Code/soapenv:Value', xmlns)
                 if fault_code is not None:
@@ -337,7 +337,7 @@ class Protocol(object):
             'env:Body', {}).setdefault('rsp:CommandLine', {})
         cmd_line['rsp:Command'] = {'#text': command}
         if arguments:
-            unicode_args = [a if isinstance(a, text_type) else a.decode('utf-8') for a in arguments]
+            unicode_args = [a if isinstance(a, str) else a.decode('utf-8') for a in arguments]
             cmd_line['rsp:Arguments'] = u' '.join(unicode_args)
 
         res = await self.send_message(xmltodict.unparse(req))
@@ -395,7 +395,7 @@ class Protocol(object):
         @return: None
         """
         try:
-            if isinstance(stdin_input, text_type):
+            if isinstance(stdin_input, str):
                 stdin_input = stdin_input.encode("437")
             req = {'env:Envelope': self._get_soap_header(
                 resource_uri='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd',  # NOQA
