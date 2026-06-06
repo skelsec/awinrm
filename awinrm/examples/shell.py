@@ -4,7 +4,16 @@ from awinrm import Session, decode_bytes
 from awinrm import logger
 from awinrm.exceptions import ShellTerminatedError
 
-import aioconsole
+
+async def ainput(prompt: str = "") -> str:
+	"""Read a line from stdin without blocking the event loop. Raises EOFError on EOF."""
+	loop = asyncio.get_event_loop()
+	if prompt:
+		await loop.run_in_executor(None, lambda: (sys.stdout.write(prompt), sys.stdout.flush()))
+	line = await loop.run_in_executor(None, sys.stdin.readline)
+	if line == "":  # readline returns '' only on EOF (Ctrl+D)
+		raise EOFError
+	return line.rstrip("\n")
 
 
 async def print_output(shell, stop_event):
@@ -39,7 +48,7 @@ async def amain(url, authtype, shell_type):
 			try:
 				while not shell.is_terminated:
 					try:
-						user_input = await aioconsole.ainput("")
+						user_input = await ainput("")
 						await shell.send_input((user_input + '\r\n').encode())
 					except ShellTerminatedError as e:
 						# Shell has terminated - this is normal when user types 'exit'

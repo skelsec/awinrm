@@ -55,7 +55,6 @@ setup(
 		'unicrypto>=0.0.11',
 		'httpx>=0.25.0',
 		'asyauth>=0.0.14',
-		'aioconsole>=0.8.1',
 		'xmltodict',
 	],
 

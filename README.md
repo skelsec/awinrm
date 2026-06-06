@@ -32,7 +32,6 @@ All dependencies are pure Python:
 - `httpx` - Async HTTP client
 - `asyauth` - Pure Python implementation of NTLM, Kerberos, SPNEGO, CredSSP
 - `unicrypto` - Cryptographic primitives
-- `aioconsole` - Async console input for interactive shells
 
 ## 🔗 URL Format
 
